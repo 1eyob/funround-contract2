@@ -1,4 +1,5 @@
 const hre = require("hardhat");
+const fs = require('fs');
 
 async function main() {
   const [deployer] = await hre.ethers.getSigners();
@@ -13,6 +14,10 @@ async function main() {
 
   await funRound.waitForDeployment();
   console.log("FunRound deployed to:", await funRound.getAddress());
+
+  const deployedAddress = await funRound.getAddress();
+  fs.writeFileSync('deployed-address.txt', deployedAddress);
+  console.log("Address saved to deployed-address.txt");
 }
 
 main()

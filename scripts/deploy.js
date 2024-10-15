@@ -10,12 +10,12 @@ async function main() {
   console.log("Account balance:", hre.ethers.formatEther(balance), "FTM");
 
   const FunRound = await hre.ethers.getContractFactory("FunRound");
-  const funRound = await FunRound.deploy(); // Deploy the contract
+  const funRound = await FunRound.deploy();
 
   await funRound.waitForDeployment();
-  console.log("FunRound deployed to:", await funRound.getAddress());
-
   const deployedAddress = await funRound.getAddress();
+  console.log("FunRound deployed to:", deployedAddress);
+
   fs.writeFileSync('deployed-address.txt', deployedAddress);
   console.log("Address saved to deployed-address.txt");
 }

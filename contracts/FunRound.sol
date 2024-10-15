@@ -74,7 +74,11 @@ contract FunRound {
     }
 
     function getPlayers() external view returns (address[MAX_PLAYERS] memory) {
-        return playerList;
+        address[MAX_PLAYERS] memory currentPlayers;
+        for (uint8 i = 0; i < playerCount; i++) {
+            currentPlayers[i] = playerList[i];
+        }
+        return currentPlayers;
     }
 
     function withdrawFees() external {

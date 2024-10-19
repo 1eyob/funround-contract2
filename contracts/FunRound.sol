@@ -21,6 +21,7 @@ contract FunRound {
     mapping(uint256 => Game) public games;
     mapping(uint256 => mapping(address => Player)) public gamePlayers;
     uint256 public nextGameId;
+    mapping(address => uint256) public playerBalances;
 
     event Deposit(uint256 indexed gameId, address indexed player, uint256 amount);
     event WinningsPaid(uint256 indexed gameId, address indexed winner, uint256 amount);
@@ -30,26 +31,33 @@ contract FunRound {
     event GameReset(uint256 indexed gameId);
     event ResultSubmitted(uint256 indexed gameId, address indexed player, address proposedWinner);
     event ResultAlreadySubmitted(uint256 indexed gameId, address indexed player);
+    event Deposited(address indexed player, uint256 amount);
 
     constructor() {
         owner = msg.sender;
     }
 
-    function joinGame() external payable returns (uint256) {
-        require(msg.value >= SESSION_FEE, "Insufficient deposit");
+    function deposit() external payable {
+        require(msg.value > 0, "Deposit amount must be greater than 0");
+        uint256 playerFee = (msg.value * PLATFORM_FEE_PERCENT) / 100;
+        uint256 depositAfterFee = msg.value - playerFee;
+        playerBalances[msg.sender] += depositAfterFee;
+        emit Deposited(msg.sender, depositAfterFee);
+        emit FeeCollected(playerFee);
+    }
+
+    function joinGame() external returns (uint256) {
+        require(playerBalances[msg.sender] >= SESSION_FEE, "Insufficient balance");
 
         uint256 gameId = findOrCreateGame();
         Game storage game = games[gameId];
 
-        uint256 playerFee = (msg.value * PLATFORM_FEE_PERCENT) / 100;
-        uint256 depositAfterFee = msg.value - playerFee;
-
-        gamePlayers[gameId][msg.sender].balance += depositAfterFee;
+        playerBalances[msg.sender] -= SESSION_FEE;
+        gamePlayers[gameId][msg.sender].balance += SESSION_FEE;
         game.players[game.playerCount] = msg.sender;
         game.playerCount++;
 
-        emit FeeCollected(playerFee);
-        emit Deposit(gameId, msg.sender, depositAfterFee);
+        emit Deposit(gameId, msg.sender, SESSION_FEE);
 
         if (game.playerCount == MAX_PLAYERS_PER_GAME) {
             game.isActive = true;
@@ -104,8 +112,8 @@ contract FunRound {
         emit GameEnded(gameId, winner);
     }
 
-    function getPlayerBalance(uint256 gameId, address player) external view returns (uint256) {
-        return gamePlayers[gameId][player].balance;
+    function getPlayerBalance(address player) external view returns (uint256) {
+        return playerBalances[player];
     }
 
     function getGamePlayers(uint256 gameId) external view returns (address[MAX_PLAYERS_PER_GAME] memory) {
@@ -133,9 +141,7 @@ contract FunRound {
     }
 
     function getContractBalance() external view returns (uint256) {
-        uint256 balance = address(this).balance;
-        require(balance <= type(uint256).max, "Balance overflow");
-        return balance;
+        return address(this).balance;
     }
 
     function isGameInProgress(uint256 gameId) public view returns (bool) {
@@ -148,5 +154,10 @@ contract FunRound {
         players = game.players;
         hasPlayed[0] = gamePlayers[gameId][game.players[0]].hasPlayed;
         hasPlayed[1] = gamePlayers[gameId][game.players[1]].hasPlayed;
+    }
+
+    receive() external payable {
+        // This function is called for plain Ether transfers, i.e. for every call with empty calldata.
+        emit Deposit(nextGameId, msg.sender, msg.value);
     }
 }

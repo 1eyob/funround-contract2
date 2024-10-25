@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 contract FunRound {
     address public immutable owner;
+    IERC20 public usdtToken;
     uint256 private constant PLATFORM_FEE_PERCENT = 10;
-    uint256 private constant SESSION_FEE = 0.01 ether;
     uint256 private constant MAX_PLAYERS_PER_GAME = 2;
     
     struct Player {
@@ -21,43 +23,48 @@ contract FunRound {
     mapping(uint256 => Game) public games;
     mapping(uint256 => mapping(address => Player)) public gamePlayers;
     uint256 public nextGameId;
-    mapping(address => uint256) public playerBalances;
+    mapping(address => uint256) public playerUSDTBalances;
 
-    event Deposit(uint256 indexed gameId, address indexed player, uint256 amount);
-    event WinningsPaid(uint256 indexed gameId, address indexed winner, uint256 amount);
+    event USDTDeposited(address indexed player, uint256 amount);
     event FeeCollected(uint256 feeAmount);
     event GameStarted(uint256 indexed gameId, address indexed player1, address indexed player2);
     event GameEnded(uint256 indexed gameId, address indexed winner);
     event GameReset(uint256 indexed gameId);
     event ResultSubmitted(uint256 indexed gameId, address indexed player, address proposedWinner);
     event ResultAlreadySubmitted(uint256 indexed gameId, address indexed player);
-    event Deposited(address indexed player, uint256 amount);
+    event DepositSuccessful(address indexed player, uint256 amount, uint256 newBalance);
+    event USDTBet(uint256 indexed gameId, address indexed player, uint256 amount);
+    event WinningsPaid(uint256 indexed gameId, address indexed winner, uint256 amount);
 
-    constructor() {
+    constructor(address _usdtToken) {
         owner = msg.sender;
+        usdtToken = IERC20(_usdtToken);
     }
 
-    function deposit() external payable {
-        require(msg.value > 0, "Deposit amount must be greater than 0");
-        uint256 playerFee = (msg.value * PLATFORM_FEE_PERCENT) / 100;
-        uint256 depositAfterFee = msg.value - playerFee;
-        playerBalances[msg.sender] += depositAfterFee;
-        emit Deposited(msg.sender, depositAfterFee);
+    function depositUSDT(uint256 amount) external {
+        require(amount > 0, "Deposit amount must be greater than 0");
+        require(usdtToken.transferFrom(msg.sender, address(this), amount), "USDT transfer failed");
+        uint256 playerFee = (amount * PLATFORM_FEE_PERCENT) / 100;
+        uint256 depositAfterFee = amount - playerFee;
+        playerUSDTBalances[msg.sender] += depositAfterFee;
+        emit USDTDeposited(msg.sender, depositAfterFee);
         emit FeeCollected(playerFee);
+        emit DepositSuccessful(msg.sender, depositAfterFee, playerUSDTBalances[msg.sender]);
     }
 
-    function joinGame() external returns (uint256) {
-        require(playerBalances[msg.sender] >= SESSION_FEE, "Insufficient balance");
+    function betUSDT(uint256 amount) external returns (uint256) {
+        require(playerUSDTBalances[msg.sender] >= amount, "Insufficient USDT balance");
+        require(amount == 1 * 10**6 || amount == 2 * 10**6 || amount == 5 * 10**6 || amount == 10 * 10**6, "Invalid bet amount");
 
         uint256 gameId = findOrCreateGame();
         Game storage game = games[gameId];
 
-        playerBalances[msg.sender] -= SESSION_FEE;
-        gamePlayers[gameId][msg.sender].balance += SESSION_FEE;
+        playerUSDTBalances[msg.sender] -= amount;
+        gamePlayers[gameId][msg.sender].balance += amount;
         game.players[game.playerCount] = msg.sender;
         game.playerCount++;
 
-        emit Deposit(gameId, msg.sender, SESSION_FEE);
+        emit USDTBet(gameId, msg.sender, amount);
 
         if (game.playerCount == MAX_PLAYERS_PER_GAME) {
             game.isActive = true;
@@ -107,13 +114,13 @@ contract FunRound {
         delete gamePlayers[gameId][game.players[1]];
         game.isActive = false;
 
-        payable(winner).transfer(winnings);
+        require(usdtToken.transfer(winner, winnings), "USDT transfer failed");
         emit WinningsPaid(gameId, winner, winnings);
         emit GameEnded(gameId, winner);
     }
 
-    function getPlayerBalance(address player) external view returns (uint256) {
-        return playerBalances[player];
+    function getPlayerUSDTBalance(address player) external view returns (uint256) {
+        return playerUSDTBalances[player];
     }
 
     function getGamePlayers(uint256 gameId) external view returns (address[MAX_PLAYERS_PER_GAME] memory) {
@@ -122,9 +129,9 @@ contract FunRound {
 
     function withdrawFees() external {
         require(msg.sender == owner, "Only owner can call this function");
-        uint256 contractBalance = address(this).balance;
+        uint256 contractBalance = usdtToken.balanceOf(address(this));
         require(contractBalance > 0, "No fees to withdraw");
-        payable(owner).transfer(contractBalance);
+        require(usdtToken.transfer(owner, contractBalance), "USDT transfer failed");
     }
 
     function resetGame(uint256 gameId) external {
@@ -132,7 +139,7 @@ contract FunRound {
         Game storage game = games[gameId];
         for (uint8 i = 0; i < game.playerCount; i++) {
             if (gamePlayers[gameId][game.players[i]].balance > 0) {
-                payable(game.players[i]).transfer(gamePlayers[gameId][game.players[i]].balance);
+                require(usdtToken.transfer(game.players[i], gamePlayers[gameId][game.players[i]].balance), "USDT transfer failed");
             }
             delete gamePlayers[gameId][game.players[i]];
         }
@@ -141,7 +148,7 @@ contract FunRound {
     }
 
     function getContractBalance() external view returns (uint256) {
-        return address(this).balance;
+        return usdtToken.balanceOf(address(this));
     }
 
     function isGameInProgress(uint256 gameId) public view returns (bool) {
@@ -156,8 +163,40 @@ contract FunRound {
         hasPlayed[1] = gamePlayers[gameId][game.players[1]].hasPlayed;
     }
 
-    receive() external payable {
-        // This function is called for plain Ether transfers, i.e. for every call with empty calldata.
-        emit Deposit(nextGameId, msg.sender, msg.value);
+    function directDepositUSDT(uint256 amount) external {
+        require(amount > 0, "Deposit amount must be greater than 0");
+        require(usdtToken.transferFrom(msg.sender, address(this), amount), "USDT transfer failed");
+        uint256 playerFee = (amount * PLATFORM_FEE_PERCENT) / 100;
+        uint256 depositAfterFee = amount - playerFee;
+        playerUSDTBalances[msg.sender] += depositAfterFee;
+        emit USDTDeposited(msg.sender, depositAfterFee);
+        emit FeeCollected(playerFee);
+        emit DepositSuccessful(msg.sender, depositAfterFee, playerUSDTBalances[msg.sender]);
+    }
+
+    function onTokenTransfer(address from, uint256 amount, bytes calldata) external returns (bool) {
+        require(msg.sender == address(usdtToken), "Only USDT token contract can call this function");
+        uint256 playerFee = (amount * PLATFORM_FEE_PERCENT) / 100;
+        uint256 depositAfterFee = amount - playerFee;
+        playerUSDTBalances[from] += depositAfterFee;
+        emit USDTDeposited(from, depositAfterFee);
+        emit FeeCollected(playerFee);
+        emit DepositSuccessful(from, depositAfterFee, playerUSDTBalances[from]);
+        return true;
+    }
+
+    function tokenFallback(address from, uint256 amount, bytes calldata) external returns (bool) {
+        require(msg.sender == address(usdtToken), "Only USDT token contract can call this function");
+        require(amount > 0, "Deposit amount must be greater than 0");
+        
+        uint256 playerFee = (amount * PLATFORM_FEE_PERCENT) / 100;
+        uint256 depositAfterFee = amount - playerFee;
+        playerUSDTBalances[from] += depositAfterFee;
+        
+        emit USDTDeposited(from, depositAfterFee);
+        emit FeeCollected(playerFee);
+        emit DepositSuccessful(from, depositAfterFee, playerUSDTBalances[from]);
+        
+        return true;
     }
 }

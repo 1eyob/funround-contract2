@@ -13,7 +13,7 @@ module.exports = {
       accounts: [PRIVATE_KEY],
       gasPrice: 3000000000, // 3 gwei
     },
-  },
+  }
 };
 
 // paths: {

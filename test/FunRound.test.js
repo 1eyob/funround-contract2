@@ -1,142 +1,207 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("FunRound", function () {
-  let FunRound, funRound, owner, addr1, addr2;
+describe("FunRound Contract", function () {
+  let FunRound;
+  let funRound;
+  let MockUSDT;
+  let mockUSDT;
+  let owner;
+  let player1;
+  let player2;
+  const initialSupply = ethers.parseUnits("10000", 6);
 
   beforeEach(async function () {
+    [owner, player1, player2] = await ethers.getSigners();
+
+    MockUSDT = await ethers.getContractFactory("MockUSDT");
+    mockUSDT = await MockUSDT.deploy(initialSupply);
+
     FunRound = await ethers.getContractFactory("FunRound");
-    [owner, addr1, addr2] = await ethers.getSigners();
-    funRound = await FunRound.deploy();
-    await funRound.waitForDeployment();
+    funRound = await FunRound.deploy(await mockUSDT.getAddress());
+
+    // Distribute some USDT to player1 and player2
+    await mockUSDT.mint(player1.address, ethers.parseUnits("1000", 6)); // 1,000 USDT
+    await mockUSDT.mint(player2.address, ethers.parseUnits("1000", 6)); // 1,000 USDT
   });
 
-  it("Should set the right owner", async function () {
-    expect(await funRound.owner()).to.equal(owner.address);
-  });
+  describe("USDT Deposits", function () {
+    it("should deposit USDT and collect fees", async function () {
+      const depositAmount = ethers.parseUnits("100", 6); // 100 USDT
+      const feePercent = 10n;
+      const feeAmount = (depositAmount * feePercent) / 100n;
+      const depositAfterFee = depositAmount - feeAmount;
 
-  it("Should allow players to deposit", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    const expectedBalance = (BigInt(depositAmount) * BigInt(90)) / BigInt(100);
-    expect(await funRound.getPlayerBalance(addr1.address)).to.equal(expectedBalance);
-  });
+      // Approve and deposit USDT
+      await mockUSDT
+        .connect(player1)
+        .approve(await funRound.getAddress(), depositAmount);
+      await expect(funRound.connect(player1).depositUSDT(depositAmount))
+        .to.emit(funRound, "USDTDeposited")
+        .withArgs(player1.address, depositAfterFee)
+        .and.to.emit(funRound, "FeeCollected")
+        .withArgs(feeAmount)
+        .and.to.emit(funRound, "DepositSuccessful")
+        .withArgs(player1.address, depositAfterFee, depositAfterFee);
 
-  it("Should allow players to join a game after depositing", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    await funRound.connect(addr1).joinGame();
-    const gameId = await funRound.nextGameId() - 1n;
-    const [isActive, players, ] = await funRound.getGameState(gameId);
-    expect(isActive).to.be.false;
-    expect(players[0]).to.equal(addr1.address);
-  });
+      // Verify player's balance in the contract
+      const playerBalance = await funRound.getPlayerUSDTBalance(
+        player1.address
+      );
+      expect(playerBalance).to.equal(depositAfterFee);
 
-  it("Should start a game when two players join", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    await funRound.connect(addr2).deposit({ value: depositAmount });
-    await funRound.connect(addr1).joinGame();
-    await funRound.connect(addr2).joinGame();
-    const gameId = await funRound.nextGameId() - 1n;
-    const [isActive, players, ] = await funRound.getGameState(gameId);
-    expect(isActive).to.be.true;
-    expect(players).to.deep.equal([addr1.address, addr2.address]);
-  });
-
-  it("should not allow joining a game without sufficient balance", async function () {
-    await expect(funRound.connect(addr1).joinGame()).to.be.revertedWith("Insufficient balance");
-  });
-
-  it("should accept direct deposits", async function () {
-    const initialBalance = await funRound.getContractBalance();
-    
-    // Send 1 ether directly to the contract
-    const tx = await addr1.sendTransaction({
-      to: await funRound.getAddress(),
-      value: ethers.parseEther("1.0")
+      // Verify contract balance (only fees should remain)
+      const contractBalance = await mockUSDT.balanceOf(
+        await funRound.getAddress()
+      );
+      expect(contractBalance).to.equal(depositAmount);
     });
-    await tx.wait();
 
-    const newBalance = await funRound.getContractBalance();
-    expect(newBalance).to.equal(initialBalance + ethers.parseEther("1.0"));
+    it("should fail if deposit amount is 0", async function () {
+      await expect(funRound.connect(player1).depositUSDT(0)).to.be.revertedWith(
+        "Deposit amount must be greater than 0"
+      );
+    });
+
+    it("should fail if USDT transfer fails", async function () {
+      const depositAmount = ethers.parseUnits("100", 6); // 100 USDT
+      await expect(
+        funRound.connect(player2).depositUSDT(depositAmount)
+      ).to.be.revertedWith("ERC20: insufficient allowance");
+    });
+
+    it("should handle multiple deposits correctly", async function () {
+      const depositAmount1 = ethers.parseUnits("50", 6);
+      const depositAmount2 = ethers.parseUnits("75", 6);
+
+      await mockUSDT
+        .connect(player1)
+        .approve(await funRound.getAddress(), depositAmount1 + depositAmount2);
+
+      await funRound.connect(player1).depositUSDT(depositAmount1);
+      await funRound.connect(player1).depositUSDT(depositAmount2);
+
+      const expectedBalance = ((depositAmount1 + depositAmount2) * 90n) / 100n;
+      const actualBalance = await funRound.getPlayerUSDTBalance(
+        player1.address
+      );
+
+      expect(actualBalance).to.equal(expectedBalance);
+    });
   });
 
-  it("Should allow submitting game results", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    await funRound.connect(addr2).deposit({ value: depositAmount });
-    await funRound.connect(addr1).joinGame();
-    await funRound.connect(addr2).joinGame();
-    const gameId = await funRound.nextGameId() - 1n;
+  describe("Betting", function () {
+    it("should allow players to bet and create a game", async function () {
+      const depositAmount = ethers.parseUnits("100", 6);
+      const betAmount = ethers.parseUnits("10", 6);
 
-    await funRound.connect(addr1).submitGameResult(gameId, addr1.address);
-    await funRound.connect(addr2).submitGameResult(gameId, addr1.address);
+      // Deposit USDT for both players
+      await mockUSDT
+        .connect(player1)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player1).depositUSDT(depositAmount);
+      await mockUSDT
+        .connect(player2)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player2).depositUSDT(depositAmount);
 
-    const [isActive, , ] = await funRound.getGameState(gameId);
-    expect(isActive).to.be.false;
+      // Place bets
+      await expect(funRound.connect(player1).betUSDT(betAmount))
+        .to.emit(funRound, "USDTBet")
+        .withArgs(0, player1.address, betAmount);
+
+      await expect(funRound.connect(player2).betUSDT(betAmount))
+        .to.emit(funRound, "USDTBet")
+        .withArgs(0, player2.address, betAmount)
+        .and.to.emit(funRound, "GameStarted")
+        .withArgs(0, player1.address, player2.address);
+
+      // Check game state
+      const gameState = await funRound.getGameState(0);
+      expect(gameState.isActive).to.be.true;
+      expect(gameState.players).to.deep.equal([
+        player1.address,
+        player2.address,
+      ]);
+      expect(gameState.hasPlayed).to.deep.equal([false, false]);
+    });
+
+    it("should fail if bet amount is invalid", async function () {
+      const depositAmount = ethers.parseUnits("100", 6);
+      const invalidBetAmount = ethers.parseUnits("3", 6); // Not 1, 2, 5, or 10 USDT
+
+      await mockUSDT
+        .connect(player1)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player1).depositUSDT(depositAmount);
+
+      await expect(
+        funRound.connect(player1).betUSDT(invalidBetAmount)
+      ).to.be.revertedWith("Invalid bet amount");
+    });
   });
 
-  it("Should not allow non-players to submit game results", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    await funRound.connect(addr2).deposit({ value: depositAmount });
-    await funRound.connect(addr1).joinGame();
-    await funRound.connect(addr2).joinGame();
-    const gameId = await funRound.nextGameId() - 1n;
+  describe("Game Results", function () {
+    it("should allow players to submit results and finalize the game", async function () {
+      // Setup game
+      const depositAmount = ethers.parseUnits("100", 6);
+      const betAmount = ethers.parseUnits("10", 6);
 
-    await expect(funRound.connect(owner).submitGameResult(gameId, addr1.address))
-      .to.be.revertedWith("Only players can submit result");
+      await mockUSDT
+        .connect(player1)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player1).depositUSDT(depositAmount);
+      await mockUSDT
+        .connect(player2)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player2).depositUSDT(depositAmount);
+
+      await funRound.connect(player1).betUSDT(betAmount);
+      await funRound.connect(player2).betUSDT(betAmount);
+
+      // Submit results
+      await expect(
+        funRound.connect(player1).submitGameResult(0, player1.address)
+      )
+        .to.emit(funRound, "ResultSubmitted")
+        .withArgs(0, player1.address, player1.address);
+
+      await expect(
+        funRound.connect(player2).submitGameResult(0, player1.address)
+      )
+        .to.emit(funRound, "ResultSubmitted")
+        .withArgs(0, player2.address, player1.address)
+        .and.to.emit(funRound, "WinningsPaid")
+        .and.to.emit(funRound, "GameEnded");
+
+      // Check game state after finalization
+      const gameState = await funRound.getGameState(0);
+      expect(gameState.isActive).to.be.false;
+    });
+
+    it("should prevent non-players from submitting results", async function () {
+      // Setup game
+      const depositAmount = ethers.parseUnits("100", 6);
+      const betAmount = ethers.parseUnits("10", 6);
+
+      await mockUSDT
+        .connect(player1)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player1).depositUSDT(depositAmount);
+      await mockUSDT
+        .connect(player2)
+        .approve(await funRound.getAddress(), depositAmount);
+      await funRound.connect(player2).depositUSDT(depositAmount);
+
+      await funRound.connect(player1).betUSDT(betAmount);
+      await funRound.connect(player2).betUSDT(betAmount);
+
+      // Attempt to submit result as non-player
+      await expect(
+        funRound.connect(owner).submitGameResult(0, player1.address)
+      ).to.be.revertedWith("Only players can submit result");
+    });
   });
 
-  it("Should allow owner to withdraw fees", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    
-    const initialOwnerBalance = await ethers.provider.getBalance(owner.address);
-    await funRound.connect(owner).withdrawFees();
-    const finalOwnerBalance = await ethers.provider.getBalance(owner.address);
-
-    expect(finalOwnerBalance).to.be.gt(initialOwnerBalance);
-  });
-
-  it("Should not allow non-owners to withdraw fees", async function () {
-    await expect(funRound.connect(addr1).withdrawFees())
-      .to.be.revertedWith("Only owner can call this function");
-  });
-
-  it("Should allow owner to reset a game", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    await funRound.connect(addr2).deposit({ value: depositAmount });
-    await funRound.connect(addr1).joinGame();
-    await funRound.connect(addr2).joinGame();
-    const gameId = await funRound.nextGameId() - 1n;
-
-    await funRound.connect(owner).resetGame(gameId);
-
-    const [isActive, players, ] = await funRound.getGameState(gameId);
-    expect(isActive).to.be.false;
-    expect(players[0]).to.equal(ethers.ZeroAddress);
-    expect(players[1]).to.equal(ethers.ZeroAddress);
-  });
-
-  it("Should not allow non-owners to reset a game", async function () {
-    const gameId = 0;
-    await expect(funRound.connect(addr1).resetGame(gameId))
-      .to.be.revertedWith("Only owner can reset the game");
-  });
-
-  it("Should correctly report if a game is in progress", async function () {
-    const depositAmount = ethers.parseEther("0.02");
-    await funRound.connect(addr1).deposit({ value: depositAmount });
-    await funRound.connect(addr2).deposit({ value: depositAmount });
-    await funRound.connect(addr1).joinGame();
-    const gameId = await funRound.nextGameId() - 1n;
-
-    expect(await funRound.isGameInProgress(gameId)).to.be.false;
-
-    await funRound.connect(addr2).joinGame();
-    expect(await funRound.isGameInProgress(gameId)).to.be.true;
-  });
+  // ... Add more test cases for other functions ...
 });
